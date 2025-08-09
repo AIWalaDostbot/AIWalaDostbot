@@ -1,0 +1,103 @@
+import os
+import requests
+import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from dotenv import load_dotenv
+
+# ---------------- CONFIG ----------------
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TEMPMAIL_BASE = os.getenv("TEMPMAIL_API_BASE")
+
+# ---------------- LOGGING ----------------
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Store user data in memory (for demo purpose)
+user_emails = {}
+
+# ---------------- COMMAND: /start ----------------
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to Vikram's Bot!\n\n"
+        "Commands:\n"
+        "/new - Get new temporary email\n"
+        "/inbox - Check your inbox\n"
+        "💬 Just type any question to chat with AI."
+    )
+
+# ---------------- COMMAND: /new ----------------
+async def new_email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        response = requests.get(f"{TEMPMAIL_BASE}/?action=genRandomMailbox&count=1").json()
+        email = response[0]
+        user_emails[update.effective_user.id] = email
+        await update.message.reply_text(f"📧 Your temporary email:\n`{email}`", parse_mode="Markdown")
+    except Exception as e:
+        logging.error(e)
+        await update.message.reply_text("❌ Failed to generate email.")
+
+# ---------------- COMMAND: /inbox ----------------
+async def inbox_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        email = user_emails.get(update.effective_user.id)
+        if not email:
+            await update.message.reply_text("⚠️ Please create a temporary email first using /new")
+            return
+        
+        username, domain = email.split("@")
+        inbox = requests.get(f"{TEMPMAIL_BASE}/?action=getMessages&login={username}&domain={domain}").json()
+
+        if not inbox:
+            await update.message.reply_text("📭 No new emails.")
+            return
+
+        reply_text = "📬 Your Inbox:\n\n"
+        for mail in inbox:
+            mail_id = mail["id"]
+            mail_subject = mail["subject"]
+            mail_from = mail["from"]
+            reply_text += f"From: {mail_from}\nSubject: {mail_subject}\nID: {mail_id}\n\n"
+        
+        await update.message.reply_text(reply_text)
+    except Exception as e:
+        logging.error(e)
+        await update.message.reply_text("❌ Failed to fetch inbox.")
+
+# ---------------- AI Chat ----------------
+async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    if user_text.startswith("/"):
+        return  # Ignore commands here
+
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+        headers = {"Content-Type": "application/json"}
+        params = {"key": GEMINI_API_KEY}
+        payload = {
+            "contents": [
+                {"parts": [{"text": user_text}]}
+            ]
+        }
+        res = requests.post(url, headers=headers, params=params, json=payload).json()
+        ai_reply = res["candidates"][0]["content"]["parts"][0]["text"]
+        await update.message.reply_text(ai_reply)
+    except Exception as e:
+        logging.error(e)
+        await update.message.reply_text("❌ AI Chat failed.")
+
+# ---------------- MAIN ----------------
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("new", new_email_command))
+    app.add_handler(CommandHandler("inbox", inbox_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_chat))
+
+    logging.info("Bot is running...")
+    app.run_polling()
